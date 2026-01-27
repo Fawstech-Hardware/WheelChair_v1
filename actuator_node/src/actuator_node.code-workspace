@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "vision_node",
+			"path": "../../vision_node"
+		}
+	],
+	"settings": {}
+}
