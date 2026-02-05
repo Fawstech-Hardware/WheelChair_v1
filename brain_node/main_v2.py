@@ -140,16 +140,9 @@ class MotorController:
 
     def connect(self):
         try:
-            if self.ws:
-                try: self.ws.close()
-                except: pass
             self.ws = websocket.create_connection(ACTUATOR_WS, timeout=2)
             Logger.log("SUCCESS", "Actuator Connected")
-            return True
-        except Exception as e:
-            Logger.log("WARNING", f"Actuator Connect Failed: {e}")
-            self.ws = None
-            return False
+        except: pass
 
     def heartbeat(self):
         while True:
@@ -182,19 +175,10 @@ class MotorController:
         Speeds should be between -255 and 255.
         Negative = Backward, Positive = Forward.
         """
-        # Optimization: Don't resend if similar AND recently sent
-        # But FORCE resend every 500ms to maintain motion
-        now = time.time()
-        if not hasattr(self, 'last_send_time'):
-            self.last_send_time = 0
-        
-        time_since_send = now - self.last_send_time
-        values_similar = (abs(left_spd - self.last_left) < 5 and 
-                         abs(right_spd - self.last_right) < 5 and
-                         not (left_spd == 0 and right_spd == 0))
-        
-        # Skip ONLY if similar AND sent within last 500ms
-        if values_similar and time_since_send < 0.5:
+        # Optimization: Don't resend if similar
+        if (abs(left_spd - self.last_left) < 5 and 
+            abs(right_spd - self.last_right) < 5 and
+            not (left_spd == 0 and right_spd == 0)):
             return
 
         left_dir = "F" if left_spd >= 0 else "B"
@@ -202,18 +186,6 @@ class MotorController:
         
         l_val = min(255, abs(int(left_spd)))
         r_val = min(255, abs(int(right_spd)))
-
-        # 🚀 KICKSTART: Overcome motor stiction when starting from stopped
-        if self.last_left == 0 and self.last_right == 0 and (l_val > 0 or r_val > 0):
-            try:
-                kickstart = {"cmd": "M", "left_dir": left_dir, "left_spd": 255,
-                            "right_dir": right_dir, "right_spd": 255}
-                with self.lock:
-                    if self.ws:
-                        self.ws.send(json.dumps(kickstart))
-                        Logger.log("DEBUG", "⚡ Kickstart pulse sent")
-                time.sleep(0.08)  # 80ms burst
-            except: pass
 
         payload = {
             "cmd": "M",
@@ -223,17 +195,11 @@ class MotorController:
 
         try:
             with self.lock:
-                if self.ws:
-                    self.ws.send(json.dumps(payload))
-                    self.last_left = left_spd
-                    self.last_right = right_spd
-                    self.last_send_time = time.time()  # Track send time
-                    Logger.log("DEBUG", f"📤 Motor: L={left_dir}{l_val} R={right_dir}{r_val}")
-                else:
-                    Logger.log("WARNING", "⚠️ Motor: No WebSocket connection!")
-        except Exception as e:
-            Logger.log("ERROR", f"Motor send failed: {e}")
-            self.connect()  # Try to reconnect
+                self.ws.send(json.dumps(payload))
+                self.last_left = left_spd
+                self.last_right = right_spd
+                # Logger.log("DEBUG", f"Motor: L{l_val} R{r_val}")
+        except: pass
 
     def move(self, direction, speed):
         """ Legacy wrapper for simple moves (Stop, Rotation) """
@@ -604,14 +570,6 @@ class SmartNavigator:
             error = bearing / 45.0
             
             if abs(bearing) > 15: # If target drift > 15 deg, Re-align (was 20)
-                # 🔙 REVERSE MANEUVER: If close AND at steep angle, back up first
-                dist = self.motor.distance
-                if abs(bearing) > 25 and 0 < dist < 60:
-                    self.log(NavState.APPROACH, f"🔙 Reversing for better view (Brg:{bearing:.0f}° Dist:{dist}cm)")
-                    self.motor.move("B", SPD_SEARCH)  # Reverse
-                    time.sleep(0.8)  # Back up for 800ms
-                    self.motor.move("S", 0)
-                
                 self.log(NavState.APPROACH, f"⚠️ Drift ({bearing:.1f}°) -> Re-aligning")
                 self.change_state(NavState.ALIGN)
                 self.motor.move("S", 0)

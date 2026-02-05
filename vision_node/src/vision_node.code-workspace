@@ -4,8 +4,8 @@
 			"path": ".."
 		},
 		{
-			"name": "actuator_node",
-			"path": "../../actuator_node"
+			"name": "vision_node_V1",
+			"path": "../../vision_node_V1"
 		}
 	],
 	"settings": {}
