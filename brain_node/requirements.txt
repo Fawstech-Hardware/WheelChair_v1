@@ -1,0 +1,19 @@
+# Wheelchair Brain Node Dependencies
+# Install with: pip install -r requirements.txt
+
+# Computer Vision
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0  # For ArUco markers
+numpy>=1.24.0
+
+# Speech Recognition & TTS
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+PyAudio>=0.2.13  # Required by SpeechRecognition for microphone access
+
+# WebSocket Communication (with Actuator ESP32)
+websocket-client>=1.6.0
+
+# HTTP Requests (for Vision Node stream)
+requests>=2.31.0
+urllib3>=2.0.0
