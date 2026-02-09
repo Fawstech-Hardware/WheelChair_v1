@@ -236,7 +236,44 @@ Wheelchair_System/
 
 ---
 
-## 🔧 Troubleshooting
+## � Switching to Smartphone Hotspot
+
+If you need to use a mobile hotspot instead of a router, follow these steps:
+
+### 1. Configure Smartphone Hotspot
+- **SSID (Name):** `Fawstech R&D`
+- **Password:** `R&D@Fawstech`
+- **Band:** **2.4 GHz** (Important: ESP32 does not support 5GHz)
+
+### 2. Update Microcontroller Code (Vision & Actuator)
+Smartphones usually assign dynamic IPs (e.g., `192.168.43.x`), so you must **disable static IP** configuration.
+
+**For `vision_node/src/main.cpp` AND `actuator_node/src/main.cpp`:**
+
+1. **Comment out** the static IP configuration:
+   ```cpp
+   // IPAddress local_IP(172, 20, 11, ...);
+   // IPAddress gateway(172, 20, 11, 1);
+   // IPAddress subnet(255, 255, 255, 0);
+   ```
+2. **Comment out** the `WiFi.config` line inside `setup()`:
+   ```cpp
+   // if (!WiFi.config(local_IP, gateway, subnet)) { ... }
+   ```
+3. **Upload** the code to both ESP32 boards.
+4. OPEN **Serial Monitor** (baud 115200) to see the new assigned IPs (e.g., `192.168.43.50`).
+
+### 3. Update Brain Node
+Update `brain_node/main.py` (and `main_test.py`) with the **NEW IPs** shown in the Serial Monitor:
+
+```python
+VISION_URL = "http://192.168.43.XXX/"      # Replace XXX with Vision Node IP
+ACTUATOR_WS = "ws://192.168.43.YYY/ws"     # Replace YYY with Actuator Node IP
+```
+
+---
+
+## �🔧 Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
