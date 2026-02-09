@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../../vision_node_V1"
+		},
+		{
+			"name": "ACTUATOR_V1",
+			"path": "../../ACTUATOR_V1"
+		},
+		{
+			"name": "vision_node",
+			"path": "../../vision_node"
+		},
+		{
+			"name": "actuator_node",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

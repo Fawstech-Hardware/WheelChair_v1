@@ -21,14 +21,14 @@ ACTUATOR_WS = "ws://172.20.11.118/ws"
 # Tuning
 X_CENTER = 160          
 STEER_DEADZONE = 35     
-STOP_AREA = 18000       
+STOP_AREA = 12000       # Reduced to stop further from marker
 ROTATION_360_TIME = 5.0 # Time for a full circle
 
 # Speed Settings
 # Speed Settings
 SPD_MAX_AUTO = 140      # ⬇️ Reduced from 170 to reduce blur
 SPD_SEARCH = 120        # ⬇️ Reduced from 150
-SPD_ALIGN = 130         # ⬇️ Reduced from 160
+SPD_ALIGN = 100         # ⬇️ Reduced for stable tracking
 SPD_KICKSTART = 200
 
 # PID Controller Settings
@@ -56,6 +56,15 @@ class LocationID(Enum):
     LIVING_ROOM = 7
     KITCHEN = 9
 
+# Navigation Graph: Which locations are connected (for pathfinding)
+NAV_GRAPH = {
+    LocationID.HALLWAY: [LocationID.BEDROOM, LocationID.LIVING_ROOM, LocationID.BATHROOM],
+    LocationID.BEDROOM: [LocationID.HALLWAY],
+    LocationID.LIVING_ROOM: [LocationID.HALLWAY, LocationID.KITCHEN],
+    LocationID.KITCHEN: [LocationID.LIVING_ROOM],
+    LocationID.BATHROOM: [LocationID.HALLWAY],
+}
+
 # --- LOGGING SYSTEM (Ported from simple_navigator) ---
 class Logger:
     """Unified logging system with different verbosity levels"""
@@ -77,41 +86,264 @@ class Logger:
         color = Logger.COLORS.get(level, Logger.COLORS['RESET'])
         print(f"{color}[{timestamp}] [{level:8}] {message}{Logger.COLORS['RESET']}")
 
-# --- 1. NON-BLOCKING VOICE ---
-class VoiceInterface:
+# --- 1. ENHANCED VOICE CONTROL ---
+from difflib import SequenceMatcher
+
+class EnhancedVoiceController:
+    """
+    Robust speech-to-text controller with fuzzy matching and confirmation.
+    Features:
+    - All location commands (kitchen, bedroom, bathroom, hallway, living room)
+    - Manual mode voice control (forward, backward, left, right)
+    - Fuzzy matching for speech recognition errors
+    - Spoken confirmation before executing commands
+    - Error handling with logging
+    """
+    
+    # Command registry: maps trigger phrases to (action_type, action_data)
+    COMMANDS = {
+        # Navigation commands
+        "kitchen": ("navigate", LocationID.KITCHEN),
+        "go to kitchen": ("navigate", LocationID.KITCHEN),
+        "take me to kitchen": ("navigate", LocationID.KITCHEN),
+        "bedroom": ("navigate", LocationID.BEDROOM),
+        "go to bedroom": ("navigate", LocationID.BEDROOM),
+        "take me to bedroom": ("navigate", LocationID.BEDROOM),
+        "bathroom": ("navigate", LocationID.BATHROOM),
+        "go to bathroom": ("navigate", LocationID.BATHROOM),
+        "take me to bathroom": ("navigate", LocationID.BATHROOM),
+        "hallway": ("navigate", LocationID.HALLWAY),
+        "go to hallway": ("navigate", LocationID.HALLWAY),
+        "living room": ("navigate", LocationID.LIVING_ROOM),
+        "go to living room": ("navigate", LocationID.LIVING_ROOM),
+        "take me to living room": ("navigate", LocationID.LIVING_ROOM),
+        
+        # Control commands
+        "stop": ("control", "stop"),
+        "halt": ("control", "stop"),
+        "emergency": ("control", "stop"),
+        "emergency stop": ("control", "stop"),
+        
+        # Mode switching
+        "manual": ("mode", "manual"),
+        "manual mode": ("mode", "manual"),
+        "take control": ("mode", "manual"),
+        "auto": ("mode", "auto"),
+        "automatic": ("mode", "auto"),
+        "autonomous": ("mode", "auto"),
+        "auto mode": ("mode", "auto"),
+        
+        # Manual movement commands
+        "forward": ("move", "F"),
+        "go forward": ("move", "F"),
+        "move forward": ("move", "F"),
+        "backward": ("move", "B"),
+        "back": ("move", "B"),
+        "go back": ("move", "B"),
+        "reverse": ("move", "B"),
+        "left": ("move", "L"),
+        "turn left": ("move", "L"),
+        "go left": ("move", "L"),
+        "right": ("move", "R"),
+        "turn right": ("move", "R"),
+        "go right": ("move", "R"),
+    }
+    
+    FUZZY_THRESHOLD = 0.70  # 70% similarity required for match
+    
     def __init__(self, brain):
         self.brain = brain
         self.engine = pyttsx3.init()
         self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
         self.speech_queue = queue.Queue()
+        self.voice_enabled = True
+        self.last_command_time = 0
+        self.error_count = 0
         
+        # Find first Realtek microphone (known to work)
+        mic_index = None
+        try:
+            for i, mic_name in enumerate(sr.Microphone.list_microphone_names()):
+                if mic_index is None and "realtek" in mic_name.lower() and "microphone" in mic_name.lower():
+                    mic_index = i
+                    Logger.log("INFO", f"🎤 Found Realtek mic at index {i}: {mic_name[:40]}")
+                    break
+        except Exception as e:
+            Logger.log("WARNING", f"Could not list microphones: {e}")
+        
+        # Use Realtek if found, otherwise default
+        if mic_index is not None:
+            self.microphone = sr.Microphone(device_index=mic_index)
+        else:
+            self.microphone = sr.Microphone()
+            Logger.log("INFO", "🎤 Using default microphone")
+        
+        # Configure recognizer - lower threshold for better sensitivity
+        self.recognizer.energy_threshold = 100  # Lowered from 300
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.pause_threshold = 0.5  # Faster response
+        
+        # Start worker threads
         threading.Thread(target=self._speech_worker, daemon=True).start()
         threading.Thread(target=self._listen_loop, daemon=True).start()
+        
+        Logger.log("SUCCESS", "🎤 Enhanced Voice Controller Ready")
 
     def _speech_worker(self):
-        """Threaded speech so it doesn't block the motors"""
+        """Threaded TTS so it doesn't block motors"""
         while True:
-            text = self.speech_queue.get()
-            self.engine.say(text)
-            self.engine.runAndWait()
+            try:
+                text = self.speech_queue.get()
+                self.engine.say(text)
+                self.engine.runAndWait()
+            except Exception as e:
+                Logger.log("ERROR", f"TTS Error: {e}")
 
     def speak(self, text):
+        """Queue text for speech output"""
         Logger.log("INFO", f"🗣️ AI: {text}")
         self.speech_queue.put(text)
 
+    def _fuzzy_match(self, heard_text):
+        """
+        Find best matching command using fuzzy string matching.
+        Returns (command_key, similarity_score) or (None, 0)
+        """
+        best_match = None
+        best_score = 0
+        
+        for command in self.COMMANDS.keys():
+            # Check if command is contained in heard text
+            if command in heard_text:
+                return command, 1.0
+            
+            # Fuzzy match
+            score = SequenceMatcher(None, heard_text, command).ratio()
+            if score > best_score:
+                best_score = score
+                best_match = command
+        
+        if best_score >= self.FUZZY_THRESHOLD:
+            return best_match, best_score
+        return None, 0
+
+    def _execute_command(self, action_type, action_data, matched_phrase):
+        """Execute the recognized command with confirmation"""
+        
+        if action_type == "navigate":
+            location_name = action_data.name.replace("_", " ").title()
+            self.speak(f"Navigating to {location_name}")
+            self.brain.set_mission(action_data)
+            Logger.log("SUCCESS", f"🎯 Voice Navigation: {location_name}")
+            
+        elif action_type == "control":
+            if action_data == "stop":
+                self.speak("Stopping")
+                self.brain.emergency_stop()
+                Logger.log("WARNING", "🛑 Voice Emergency Stop")
+                
+        elif action_type == "mode":
+            if action_data == "manual":
+                self.speak("Manual mode activated")
+                self.brain.manual_mode = True
+                self.brain.change_state(NavState.MANUAL)
+                self.brain.motor.move("S", 0)
+                Logger.log("INFO", "🎮 Voice: Manual Mode ON")
+            elif action_data == "auto":
+                self.speak("Autonomous mode activated")
+                self.brain.manual_mode = False
+                self.brain.change_state(NavState.IDLE)
+                self.brain.motor.move("S", 0)
+                Logger.log("INFO", "🤖 Voice: Auto Mode ON")
+                
+        elif action_type == "move":
+            if not self.brain.manual_mode:
+                self.speak("Please enable manual mode first")
+                return
+            
+            direction_names = {"F": "forward", "B": "backward", "L": "left", "R": "right"}
+            self.speak(f"Moving {direction_names.get(action_data, action_data)}")
+            self.brain.motor.move(action_data, SPD_MAX_AUTO)
+            Logger.log("DEBUG", f"🕹️ Voice Move: {action_data}")
+
     def _listen_loop(self):
-        with self.microphone as source:
-            self.recognizer.adjust_for_ambient_noise(source)
-            while True:
-                try:
-                    audio = self.recognizer.listen(source, phrase_time_limit=4)
-                    text = self.recognizer.recognize_google(audio).lower()
-                    Logger.log("INFO", f"👂 Heard: {text}")
-                    if "kitchen" in text: self.brain.set_mission(LocationID.KITCHEN)
-                    elif "bedroom" in text: self.brain.set_mission(LocationID.BEDROOM)
-                    elif "stop" in text: self.brain.emergency_stop()
-                except: pass
+        """Main listening loop with error recovery"""
+        # Calibrate for ambient noise on startup
+        try:
+            with self.microphone as source:
+                Logger.log("INFO", "🎤 Calibrating microphone...")
+                self.recognizer.adjust_for_ambient_noise(source, duration=2)
+                Logger.log("SUCCESS", "🎤 Microphone calibrated")
+        except Exception as e:
+            Logger.log("ERROR", f"Microphone init failed: {e}")
+            return
+        
+        while True:
+            if not self.voice_enabled:
+                time.sleep(0.5)
+                continue
+                
+            try:
+                with self.microphone as source:
+                    # Listen with timeout
+                    audio = self.recognizer.listen(
+                        source, 
+                        timeout=10,
+                        phrase_time_limit=5
+                    )
+                
+                # Recognize speech
+                heard_text = self.recognizer.recognize_google(audio).lower().strip()
+                Logger.log("INFO", f"👂 Heard: \"{heard_text}\"")
+                
+                # Debounce: ignore if same command within 1 second
+                current_time = time.time()
+                if current_time - self.last_command_time < 1.0:
+                    continue
+                
+                # Special toggle commands
+                if "voice off" in heard_text:
+                    self.speak("Voice control disabled")
+                    self.voice_enabled = False
+                    continue
+                elif "voice on" in heard_text:
+                    self.voice_enabled = True
+                    self.speak("Voice control enabled")
+                    continue
+                
+                # Find matching command
+                matched_cmd, score = self._fuzzy_match(heard_text)
+                
+                if matched_cmd:
+                    action_type, action_data = self.COMMANDS[matched_cmd]
+                    Logger.log("DEBUG", f"🎯 Matched: \"{matched_cmd}\" (score: {score:.2f})")
+                    self._execute_command(action_type, action_data, matched_cmd)
+                    self.last_command_time = current_time
+                    self.error_count = 0  # Reset error count on success
+                else:
+                    Logger.log("DEBUG", f"❓ No command match for: \"{heard_text}\"")
+                
+            except sr.WaitTimeoutError:
+                # Normal timeout, continue listening
+                pass
+            except sr.UnknownValueError:
+                # Could not understand audio
+                Logger.log("DEBUG", "🔇 Could not understand speech")
+            except sr.RequestError as e:
+                # API error
+                self.error_count += 1
+                Logger.log("WARNING", f"🌐 Speech API error: {e}")
+                if self.error_count > 5:
+                    Logger.log("ERROR", "Too many API errors, pausing voice...")
+                    time.sleep(10)
+                    self.error_count = 0
+            except Exception as e:
+                Logger.log("ERROR", f"Voice loop error: {e}")
+                time.sleep(1)
+
+
+# Legacy alias for compatibility
+VoiceInterface = EnhancedVoiceController
 
 # --- 2. THREAD-SAFE MOTOR HAL ---
 class MotorController:
@@ -131,9 +363,16 @@ class MotorController:
 
     def connect(self):
         try:
+            if self.ws:
+                try: self.ws.close()
+                except: pass
             self.ws = websocket.create_connection(ACTUATOR_WS, timeout=2)
             Logger.log("SUCCESS", "Actuator Connected")
-        except: pass
+            return True
+        except Exception as e:
+            Logger.log("WARNING", f"Actuator Connect Failed: {e}")
+            self.ws = None
+            return False
 
     def heartbeat(self):
         while True:
@@ -166,10 +405,19 @@ class MotorController:
         Speeds should be between -255 and 255.
         Negative = Backward, Positive = Forward.
         """
-        # Optimization: Don't resend if similar
-        if (abs(left_spd - self.last_left) < 5 and 
-            abs(right_spd - self.last_right) < 5 and
-            not (left_spd == 0 and right_spd == 0)):
+        # Optimization: Don't resend if similar AND recently sent
+        # But FORCE resend every 500ms to maintain motion
+        now = time.time()
+        if not hasattr(self, 'last_send_time'):
+            self.last_send_time = 0
+        
+        time_since_send = now - self.last_send_time
+        values_similar = (abs(left_spd - self.last_left) < 5 and 
+                         abs(right_spd - self.last_right) < 5 and
+                         not (left_spd == 0 and right_spd == 0))
+        
+        # Skip ONLY if similar AND sent within last 500ms
+        if values_similar and time_since_send < 0.5:
             return
 
         left_dir = "F" if left_spd >= 0 else "B"
@@ -177,6 +425,18 @@ class MotorController:
         
         l_val = min(255, abs(int(left_spd)))
         r_val = min(255, abs(int(right_spd)))
+
+        # 🚀 KICKSTART: Overcome motor stiction when starting from stopped
+        if self.last_left == 0 and self.last_right == 0 and (l_val > 0 or r_val > 0):
+            try:
+                kickstart = {"cmd": "M", "left_dir": left_dir, "left_spd": 255,
+                            "right_dir": right_dir, "right_spd": 255}
+                with self.lock:
+                    if self.ws:
+                        self.ws.send(json.dumps(kickstart))
+                        Logger.log("DEBUG", "⚡ Kickstart pulse sent")
+                time.sleep(0.08)  # 80ms burst
+            except: pass
 
         payload = {
             "cmd": "M",
@@ -186,11 +446,17 @@ class MotorController:
 
         try:
             with self.lock:
-                self.ws.send(json.dumps(payload))
-                self.last_left = left_spd
-                self.last_right = right_spd
-                # Logger.log("DEBUG", f"Motor: L{l_val} R{r_val}")
-        except: pass
+                if self.ws:
+                    self.ws.send(json.dumps(payload))
+                    self.last_left = left_spd
+                    self.last_right = right_spd
+                    self.last_send_time = time.time()  # Track send time
+                    Logger.log("DEBUG", f"📤 Motor: L={left_dir}{l_val} R={right_dir}{r_val}")
+                else:
+                    Logger.log("WARNING", "⚠️ Motor: No WebSocket connection!")
+        except Exception as e:
+            Logger.log("ERROR", f"Motor send failed: {e}")
+            self.connect()  # Try to reconnect
 
     def move(self, direction, speed):
         """ Legacy wrapper for simple moves (Stop, Rotation) """
@@ -360,6 +626,10 @@ class SmartNavigator:
         self.current_rvec = None
         self.current_tvec = None
 
+        # Path Planning
+        self.waypoint_queue = []  # List of LocationIDs to visit
+        self.final_destination = None  # The ultimate goal
+
         # PID
         self.error_integral = 0
         self.last_error = 0
@@ -382,13 +652,53 @@ class SmartNavigator:
             Logger.log("STATE", f"[{state.value:<10}] {msg}")
             self.last_log_time = time.time()
 
-    def set_mission(self, target_loc):
-        self.voice.speak(f"Navigating to {target_loc.name}")
-        self.target_loc = target_loc
+    def find_path(self, start, goal):
+        """Find shortest path between locations using BFS"""
+        Logger.log("DEBUG", f"Finding path: {start.name} → {goal.name}")
+        from collections import deque
+        queue = deque([(start, [start])])
+        visited = {start}
+        
+        while queue:
+            current, path = queue.popleft()
+            if current == goal:
+                result = path[1:]  # Exclude start location
+                Logger.log("DEBUG", f"Path found: {[loc.name for loc in result]}")
+                return result
+            
+            for neighbor in NAV_GRAPH.get(current, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        Logger.log("WARNING", "No path found!")
+        return []  # No path found
 
+    def set_mission(self, target_loc):
+        """Start navigation with automatic path planning"""
+        # Calculate path from current location to target
+        path = self.find_path(self.current_loc, target_loc)
+        
+        if not path:
+            # Direct navigation (no path needed or already at location)
+            if self.current_loc == target_loc:
+                self.voice.speak(f"Already at {target_loc.name}")
+                return
+            path = [target_loc]  # Try direct if no graph path
+        
+        # Store the path
+        self.waypoint_queue = path.copy()
+        self.final_destination = target_loc
+        
+        # Start with first waypoint
+        self.target_loc = self.waypoint_queue.pop(0)
+        
+        # Announce the route
+        route_names = " → ".join([loc.name for loc in [self.current_loc] + [self.target_loc] + self.waypoint_queue])
+        self.voice.speak(f"Route: {route_names}")
+        
         self.change_state(NavState.SCAN)
         self.scan_start_time = time.time()
-        Logger.log("SUCCESS", f"🚀 MISSION START: {self.current_loc.name} -> {target_loc.name}")
+        Logger.log("SUCCESS", f"🚀 PATH: {route_names}")
         
     def change_state(self, new_state):
         if self.state != new_state:
@@ -435,7 +745,7 @@ class SmartNavigator:
     def handle_align(self, id_list, corners):
         """State: ALIGN - Face the marker using 3D Bearing (tvec)"""
         if self.target_loc.value not in id_list:
-            if time.time() - self.last_marker_time > 3.0: # ⬆️ Increased Timeout (was 1.0)
+            if time.time() - self.last_marker_time > 5.0: # 5 sec timeout
                 self.log(NavState.ALIGN, "❌ Target Lost! Back to SCAN.")
                 self.change_state(NavState.SCAN)
                 self.scan_start_time = time.time()
@@ -502,6 +812,9 @@ class SmartNavigator:
         self.last_marker_time = time.time()
         idx = id_list.index(self.target_loc.value)
         
+        # Get ultrasonic distance from actuator
+        dist = self.motor.distance
+        
         # 3D POSE CHECK
         rvec, tvec, success = self.pose.estimate([corners[idx]])
         if success:
@@ -516,22 +829,39 @@ class SmartNavigator:
             # If bearing is positive (Target is Right), we turn Right.
             error = bearing / 45.0
             
-            if abs(bearing) > 20: # If target drift > 20 deg, Re-align
+            if abs(bearing) > 15: # If target drift > 15 deg, Re-align (was 20)
+                # 🔙 REVERSE MANEUVER: If close AND at steep angle, back up first
+                if abs(bearing) > 25 and 0 < dist < 60:
+                    self.log(NavState.APPROACH, f"🔙 Reversing for better view (Brg:{bearing:.0f}° Dist:{dist}cm)")
+                    self.motor.move("B", SPD_SEARCH)  # Reverse
+                    time.sleep(0.8)  # Back up for 800ms
+                    self.motor.move("S", 0)
+                
                 self.log(NavState.APPROACH, f"⚠️ Drift ({bearing:.1f}°) -> Re-aligning")
                 self.change_state(NavState.ALIGN)
                 self.motor.move("S", 0)
                 return
 
-            # ARRIVED CHECK
+            # ========== ARRIVAL CHECK (Ultrasonic Priority) ==========
+            # Stop when ultrasonic reads 25-35cm (user specified)
+            # Use area only as a safety fallback (marker very close)
             area = cv2.contourArea(corners[idx])
-            dist = self.motor.distance
             
-            if (area > STOP_AREA) or (0 < dist < 25):
-                 self.change_state(NavState.ARRIVED)
-                 self.motor.move("S", 0)
-                 self.log(NavState.APPROACH, "🏁 Arrived Safely!")
-                 return
+            # Primary: Ultrasonic distance (25-35cm stop zone)
+            if 0 < dist < 35:  # Stop at 35cm 
+                self.change_state(NavState.ARRIVED)
+                self.motor.move("S", 0)
+                self.log(NavState.APPROACH, f"🏁 Arrived! (Ultrasonic: {dist:.0f}cm)")
+                return
+            
+            # Safety fallback: Marker area extremely large (very close)
+            if area > 25000:  # Much larger threshold - safety only
+                self.change_state(NavState.ARRIVED)
+                self.motor.move("S", 0)
+                self.log(NavState.APPROACH, f"🏁 Arrived! (Area: {area:.0f})")
+                return
 
+            # ========== DRIVE FORWARD ==========
             # Drive with angular correction (Steer to 0 Bearing)
             pid_out = self.calculate_pid(error)
             turn_adj = pid_out * MAX_TURN_DIFF
@@ -542,7 +872,7 @@ class SmartNavigator:
             r_spd = SPD_MAX_AUTO - turn_adj
             
             self.motor.send_differential(l_spd, r_spd)
-            self.log(NavState.APPROACH, f"🚀 Brg:{bearing:.1f}° Dist:{dist}cm")
+            self.log(NavState.APPROACH, f"🚀 Brg:{bearing:.1f}° Dist:{dist}cm Area:{area:.0f}")
 
 
     def run(self):
@@ -596,10 +926,24 @@ class SmartNavigator:
                 elif self.state == NavState.APPROACH:
                     self.handle_approach(id_list, corners)
                 elif self.state == NavState.ARRIVED:
-                    self.voice.speak(f"Arrived at {self.target_loc.name}")
+                    # Update current location
                     self.current_loc = self.target_loc
-                    self.target_loc = None
-                    self.change_state(NavState.IDLE)
+                    
+                    # Check if there are more waypoints to visit
+                    if self.waypoint_queue:
+                        # Continue to next waypoint
+                        self.voice.speak(f"Reached {self.target_loc.name}. Continuing...")
+                        self.target_loc = self.waypoint_queue.pop(0)
+                        Logger.log("INFO", f"📍 Next waypoint: {self.target_loc.name}")
+                        self.change_state(NavState.SCAN)
+                        self.scan_start_time = time.time()
+                    else:
+                        # Final destination reached
+                        self.voice.speak(f"Arrived at {self.target_loc.name}")
+                        Logger.log("SUCCESS", f"🏁 MISSION COMPLETE: {self.target_loc.name}")
+                        self.target_loc = None
+                        self.final_destination = None
+                        self.change_state(NavState.IDLE)
                 
                 # 5. Enhanced HUD (Smaller overlay)
                 overlay = frame.copy()
